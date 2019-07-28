@@ -9,6 +9,10 @@ no longer than the maxlen.
 
 Nothing is done in cases where lines cannot be made shorter than maxlen.
 Use the -w flag to see warnings about these lines.
+
+Design:
+
+Each input file's input is processed 1 byte at a time.
 */
 package main
 
@@ -106,7 +110,7 @@ func main() {
 		log.Fatalf("usage: goline maxlen path ...\n")
 	}
 
-	maxlen, err := strconv.Atoi(args[0])
+	_, err := strconv.Atoi(args[0])
 	handleErr(err, "failed to parse maxlen \"%s\" argument as int", args[1])
 
 	paths := args[1:]
@@ -127,10 +131,12 @@ func main() {
 		// out is the maxlen enforced file.
 		// line is the current line being parsed. Lines are written to files
 		// when newlines are encountered.
+		// lineNum is incremented whenever a newline occurs.
 		// tok is the current token. Tokens cannot be split. See tokEnds for
 		// runes which when encountered end a token.
 		out := bytes.NewBuffer(nil)
 		line := bytes.NewBuffer(nil)
+		lineNum := 0
 		tok := bytes.NewBuffer(nil)
 
 		// lineIndent is the current line's indent
@@ -159,19 +165,8 @@ func main() {
 		// first. So if a line-comment starts (which includes 2 tokEnds
 		// runes in a row: '//') a new token will not be started since
 		// special logic handles syntaxMode changes.
-		//
-		// Special characters which where not included:
-		// underscore ('_'): variables can have in their name. We want to treat
-		// variable names as 1 token.
-		// back slash ('\\'): a backslash is used to escape something else,
-		// we should treat a back slash and the thing it is escaping as 1 token.
-		// double quote ('"') and single quote ('\''): a bit pointless to
-		// consider any type of quote its own token. This would result in lines
-		// which may contain an empty string and on the next line the
-		// full string.
-		tokEnds := []rune{'~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')',
-			'-', '+', '=', '|', '}', ']', '{', '[', ':', ';', '/', '?', '.',
-			'>', '<', ','}
+		tokEnds := []rune{'~', '!', '^', '*', '(', ')', '-', '+', '=', '|',
+			'}', '{', ':', ';', '/', '?', '.', '>', '<', ','}
 		tokEndBytes := []byte{}
 		for _, r := range tokEnds {
 			tokEndBytes = append(tokEndBytes, byte(r))
@@ -180,7 +175,8 @@ func main() {
 		// lastB is the last byte, empty if b is the first byte
 		var lastB byte
 
-		for { // For each byte
+		for {
+			// For each byte
 			b, err := srcBuf.ReadByte()
 			if err == io.EOF {
 				break
@@ -188,14 +184,10 @@ func main() {
 			handleErr(err, "failed to read byte from source file \"%s\"", path)
 
 			// If beginning of line indent write and record new indent level
-			if lastB == byte('\t') && b == lastB {
+			if b == byte('\t') {
 				lineIndent.before.tabs++
-				lastB = b
-				continue
 			} else if lastB == byte(' ') && b == lastB {
 				lineIndent.before.spaces++
-				lastB = b
-				continue
 			}
 
 			// If entering comment
@@ -206,89 +198,46 @@ func main() {
 				// comment end token.
 				if lastB == byte('*') && b == byte('/') { // End comment
 					syntaxMode = ""
-					_ = tok.WriteByte(b)
-					lastB = b
-					continue
 				}
 			} else if lastB == byte('/') && b == byte('*') {
 				// Start block comment
 				syntaxMode = "block-comment"
-				_ = tok.WriteByte(b)
-				lastB = b
-				continue
 			} else if lastB == byte('/') && b == lastB {
 				// Start line comment
 				syntaxMode = "line-comment"
-				_ = tok.WriteByte(b)
-				lastB = b
-				continue
 			}
 
-			// If token ending byte
-			// doNewLine will force the code following this for loop
-			// to add a new line to the file
-			var doNewLine bool
+			// Accumulate bytes in tok
+			switch b {
+			case byte('\n'):
+				tok.WriteByte(byte('\n'))
+				lineNum++
 
-			matchTokEndBytes := false
-
-			for _, end := range tokEndBytes {
-				if end == b { // Add tok to line
-					matchTokEndBytes = true
-					// Check if doing so would make line larger
-					if line.Len()+tok.Len() > maxlen {
-						// Token won't fit, newline and indent. See
-						// syntaxMode for explanation of behavior.
-						switch syntaxMode {
-						case "line-comment":
-							doNewLine = true
-							break
-						case "block-comment":
-							doNewLine = true
-							break
-						default:
-							doNewLine = true
-							break
-						}
-
-						_, err = tok.WriteTo(out)
-						handleErr(err, "failed to write token to line in "+
-							"source file \"%s\"", path)
-						tok.Reset()
-
-						_ = tok.WriteByte(b)
-					} else {
-						// Token will fit on current line, add
-						_, err = tok.WriteTo(out)
-						handleErr(err, "failed to write token to line in "+
-							"source file \"%s\"", path)
-						tok.Reset()
-
-						_ = tok.WriteByte(b)
+				_, err = tok.WriteTo(line)
+				handleErr(err, "failed to write last token on line %d \"%s\"",
+					lineNum, tok.String())
+				tok.Reset()
+				break
+			default:
+				// If b starts a new token
+				matchTokEnds := false
+				for _, v := range tokEndBytes {
+					if v == b {
+						matchTokEnds = true
+						break
 					}
 				}
-			}
 
-			// If new line
-			if doNewLine || b == byte('\n') {
-				// Add existing token to line
-				_, err = tok.WriteTo(line)
-				handleErr(err, "failed to write output for source file \"%s\"",
-					path)
-				tok.Reset()
+				// Write existing token to line and start new token
+				if matchTokEnds {
+					_, err = tok.WriteTo(line)
+					handleErr(err, "failed to write token \"%s\" to line %d",
+						tok.String(), lineNum)
 
-				// Write new line to line
-				_ = line.WriteByte(byte('\n'))
+					tok.Reset()
+				}
 
-				// Write line to ouptut
-				_, err = line.WriteTo(out)
-				handleErr(err, "failed to write output for source file \"%s\"",
-					path)
-				line.Reset()
-				continue
-			}
-
-			if !matchTokEndBytes {
-				_ = tok.WriteByte(b)
+				tok.WriteByte(b)
 			}
 
 			lastB = b
@@ -307,6 +256,6 @@ func main() {
 				path)
 		}
 
-		log.Printf("%s\n", out.String())
+		fmt.Printf("%s\n", out.String())
 	}
 }
