@@ -52,7 +52,7 @@ type indentParams struct {
 }
 
 // indentPattern specifies a location on a line indepentant of the current
-// indentation (ie., it does not use characters as a measuremant because
+// indentation (ie., it doesn't use characters as a measurement because
 // those could change with new indentation).
 type indentPattern struct {
 	// patern which matches the beginning of the location
