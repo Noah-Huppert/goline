@@ -1,3 +1,5 @@
+[![GoDoc](https://godoc.org/github.com/Noah-Huppert/goline?status.svg)](https://godoc.org/github.com/Noah-Huppert/goline)
+
 # goline
 Line length focused formatted for the Go programming language.
 
