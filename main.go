@@ -103,6 +103,90 @@ type indentPattern struct {
 	matchIndex uint
 }
 
+// maxlenWriter writes lines no longer than maxlen to an output writer.
+// Close() must be called to flush bytes out of buffers.
+type maxlenWriter struct {
+	// maxlen is the maximum number of characters a line can be
+	maxlen uint64
+
+	// out is the buffer to which lines will be written
+	out *bytes.Buffer
+
+	// line holds the current line which is under maxlen
+	line *bytes.Buffer
+}
+
+// newMaxlenWriter creates a new maxlenWriter
+func newMaxlenWriter(maxlen uint64, out *bytes.Buffer) *maxlenWriter {
+	return &maxlenWriter{
+		maxlen: maxlen,
+		out:    out,
+		line:   bytes.NewBuffer(nil),
+	}
+}
+
+// Write writes tok to line if result is less than maxlen long. If line
+// would be too long with tok then line is written to out and then
+// the tok are written to a line.
+func (w *maxlenWriter) Write(tok *bytes.Buffer, syntaxMode string,
+	lineIndent indent) error {
+
+	// If we need a new line
+	if w.line.Len()+tok.Len() > int(w.maxlen) {
+		// handle new lines different based on syntaxMode
+		switch syntaxMode {
+		default:
+			lineIndent.before.tabs++
+
+			w.line.WriteByte(byte('\n'))
+			break
+		}
+
+		// Write line to out buffer
+		_, err := w.line.WriteTo(w.out)
+		if err != nil {
+			return fmt.Errorf("failed to write line to out: %s", err.Error())
+		}
+
+		log.Printf("out+%s", w.line.String())
+
+		w.line.Reset()
+
+		// handle writing new line pre-content based on syntaxMode
+		switch syntaxMode {
+		default:
+			_, err := w.line.Write(lineIndent.before.bytes())
+			if err != nil {
+				return fmt.Errorf("failed to write indentation before "+
+					"line: %s", err.Error())
+			}
+			break
+		}
+	}
+
+	// TODO: figure out why tok is empty he
+	_, err := tok.WriteTo(w.line)
+	if err != nil {
+		return fmt.Errorf("failed to write to line: %s", err.Error())
+	}
+
+	return nil
+}
+
+// Close flushes buffers
+func (w *maxlenWriter) Close() error {
+	// Flush line
+	if w.line.Len() > 0 {
+		_, err := w.line.WriteTo(w.out)
+		if err != nil {
+			return fmt.Errorf("failed to flush line to out buffer: %s",
+				err.Error())
+		}
+	}
+
+	return nil
+}
+
 func main() {
 	args := os.Args[1:]
 
@@ -110,7 +194,7 @@ func main() {
 		log.Fatalf("usage: goline maxlen path ...\n")
 	}
 
-	_, err := strconv.Atoi(args[0])
+	maxlen, err := strconv.ParseUint(args[0], 10, 64)
 	handleErr(err, "failed to parse maxlen \"%s\" argument as int", args[1])
 
 	paths := args[1:]
@@ -129,15 +213,17 @@ func main() {
 
 		// Parse file and enforce maxlen.
 		// out is the maxlen enforced file.
-		// line is the current line being parsed. Lines are written to files
-		// when newlines are encountered.
-		// lineNum is incremented whenever a newline occurs.
 		// tok is the current token. Tokens cannot be split. See tokEnds for
 		// runes which when encountered end a token.
 		out := bytes.NewBuffer(nil)
-		line := bytes.NewBuffer(nil)
+		maxlenW := newMaxlenWriter(maxlen, out)
 		lineNum := 0
 		tok := bytes.NewBuffer(nil)
+
+		defer func() {
+			err := maxlenW.Close()
+			handleErr(err, "failed to maxlenWriter buffer for \"%s\"", path)
+		}()
 
 		// lineIndent is the current line's indent
 		var lineIndent indent
@@ -166,7 +252,7 @@ func main() {
 		// runes in a row: '//') a new token will not be started since
 		// special logic handles syntaxMode changes.
 		tokEnds := []rune{'~', '!', '^', '*', '(', ')', '-', '+', '=', '|',
-			'}', '{', ':', ';', '/', '?', '.', '>', '<', ','}
+			'}', '{', ':', ';', '/', '?', '.', '>', '<', ',', '\n'}
 		tokEndBytes := []byte{}
 		for _, r := range tokEnds {
 			tokEndBytes = append(tokEndBytes, byte(r))
@@ -208,50 +294,47 @@ func main() {
 			}
 
 			// Accumulate bytes in tok
-			switch b {
-			case byte('\n'):
-				tok.WriteByte(byte('\n'))
-				lineNum++
+			/*
+				switch b {
+				case byte('\n'):
+					tok.WriteByte(byte('\n'))
+					lineNum++
 
-				_, err = tok.WriteTo(line)
-				handleErr(err, "failed to write last token on line %d \"%s\"",
-					lineNum, tok.String())
-				tok.Reset()
-				break
-			default:
-				// If b starts a new token
-				matchTokEnds := false
-				for _, v := range tokEndBytes {
-					if v == b {
-						matchTokEnds = true
-						break
-					}
-				}
-
-				// Write existing token to line and start new token
-				if matchTokEnds {
-					_, err = tok.WriteTo(line)
-					handleErr(err, "failed to write token \"%s\" to line %d",
-						tok.String(), lineNum)
-
+					err := maxlenW.Write(tok, syntaxMode, lineIndent)
+					handleErr(err, "failed to write last token on line %d \"%s\"",
+						lineNum, tok.String())
 					tok.Reset()
+					break
+				default:
+			*/
+			// If b starts a new token
+			matchTokEnds := false
+			for _, v := range tokEndBytes {
+				if v == b {
+					matchTokEnds = true
+					break
 				}
-
-				tok.WriteByte(b)
 			}
+
+			// Write existing token to line and start new token
+			if matchTokEnds {
+				err = maxlenW.Write(tok, syntaxMode, lineIndent)
+				handleErr(err, "failed to write token \"%s\" to line %d",
+					tok.String(), lineNum)
+
+				tok.Reset()
+			}
+
+			tok.WriteByte(b)
+			/*break
+			}*/
 
 			lastB = b
 		}
 
 		// Write remaining lines and tokens
 		if tok.Len() > 0 {
-			_, err = tok.WriteTo(line)
-			handleErr(err, "failed to write output for source file \"%s\"",
-				path)
-		}
-
-		if line.Len() > 0 {
-			_, err = line.WriteTo(out)
+			err = maxlenW.Write(tok, syntaxMode, lineIndent)
 			handleErr(err, "failed to write output for source file \"%s\"",
 				path)
 		}
